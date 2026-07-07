@@ -8,10 +8,8 @@ from typing import Any
 from pydantic import BaseModel
 
 from google.adk.agents import LlmAgent, Context
-from google.adk.tools import AgentTool
 from google.adk.tools import McpToolset
 from google.adk.tools.mcp_tool import StdioConnectionParams
-from google.adk.events.request_input import RequestInput
 from google.adk.workflow import Workflow, Edge, START, FunctionNode
 from google.adk.apps import App
 from mcp.client.stdio import StdioServerParameters
@@ -22,16 +20,13 @@ logger = logging.getLogger("travel_security")
 logger.setLevel(logging.INFO)
 
 
-# ── State schema ──────────────────────────────────────────────────────
 class TravelState(BaseModel):
     user_request: str = ""
+    raw_data: str = ""
     itinerary_plan: str = ""
-    human_feedback: str = ""
-    final_output: str = ""
     security_alert: str = ""
 
 
-# ── MCP Toolset (stdio subprocess) ───────────────────────────────────
 mcp_path = os.path.join(os.path.dirname(__file__), "mcp_server.py")
 mcp_toolset = McpToolset(
     connection_params=StdioConnectionParams(
@@ -43,137 +38,52 @@ mcp_toolset = McpToolset(
 )
 
 
-# ── Sub-agents ────────────────────────────────────────────────────────
-research_agent = LlmAgent(
-    name="research_agent",
+planner_agent = LlmAgent(
+    name="planner",
     model=config.model,
     instruction=(
-        "Research destination facts and popular attractions using the local attractions tool."
+        "You are a travel planner. Gather all necessary information by calling the available "
+        "tools in parallel where possible. Do NOT generate the final itinerary yet.\n\n"
+        "Call these tools based on the user's request:\n"
+        "- get_local_attractions(location): find attractions at the destination\n"
+        "- get_weather_forecast(location, days): check weather for the trip dates\n"
+        "- get_currency_exchange(base, target): if currency conversion is needed\n"
+        "- get_flight_status(flight_number): if a flight number is given\n\n"
+        "Once you have all the data, summarize it as raw facts and store in ctx.state['raw_data']."
     ),
     tools=[mcp_toolset],
+    output_key="raw_data",
 )
+
 
 itinerary_agent = LlmAgent(
-    name="itinerary_agent",
+    name="itinerary_generator",
     model=config.model,
     instruction=(
-        "Create a detailed, day-by-day travel itinerary based on the destination highlights, "
-        "budget, and weather information."
-    ),
-    tools=[mcp_toolset],
-)
-
-budget_agent = LlmAgent(
-    name="budget_agent",
-    model=config.model,
-    instruction=(
-        "Provide cost estimation for the trip including lodging, food, transport, and activities. "
-        "Handle currency conversions using the currency exchange tool if needed."
-    ),
-    tools=[mcp_toolset],
-)
-
-weather_agent = LlmAgent(
-    name="weather_agent",
-    model=config.model,
-    instruction=(
-        "Retrieve weather forecasts and provide clothing/gear advice for the destination "
-        "using the weather forecast tool."
-    ),
-    tools=[mcp_toolset],
-)
-
-packing_agent = LlmAgent(
-    name="packing_agent",
-    model=config.model,
-    instruction=(
-        "Create a personalized packing checklist based on the destination, "
-        "planned activities, and weather advice."
+        "You are a travel document designer. Using the raw data from ctx.state['raw_data'], "
+        "create a polished, visually appealing markdown travel itinerary.\n\n"
+        "Structure it with these sections:\n"
+        "1. Destination Overview\n"
+        "2. Day-by-Day Itinerary\n"
+        "3. Estimated Budget\n"
+        "4. Packing Checklist\n"
+        "5. Safety & Etiquette Tips\n\n"
+        "Use emoji icons (e.g., ✈️ 🏨 🍽️ 🎒 ☀️) and markdown formatting "
+        "(headings, tables, bold) to make it presentation-ready.\n\n"
+        "Store the final document in ctx.state['itinerary_plan']."
     ),
     tools=[],
-)
-
-travel_advisor_agent = LlmAgent(
-    name="travel_advisor_agent",
-    model=config.model,
-    instruction=(
-        "Provide safety recommendations, local etiquette rules, general travel tips, "
-        "and track flight status if flight numbers are provided using the flight status tool."
-    ),
-    tools=[mcp_toolset],
-)
-
-
-# ── Orchestrator ──────────────────────────────────────────────────────
-research_tool = AgentTool(agent=research_agent)
-itinerary_tool = AgentTool(agent=itinerary_agent)
-budget_tool = AgentTool(agent=budget_agent)
-weather_tool = AgentTool(agent=weather_agent)
-packing_tool = AgentTool(agent=packing_agent)
-travel_advisor_tool = AgentTool(agent=travel_advisor_agent)
-
-orchestrator = LlmAgent(
-    name="orchestrator",
-    model=config.model,
-    instruction=(
-        "You are the lead travel concierge. Coordinate with all specialized sub-agents "
-        "to fulfill the user's travel request from ctx.state['user_request'].\n\n"
-        "Follow these steps sequentially to build the complete travel plan:\n"
-        "1. Call research_tool to get local attractions and highlights.\n"
-        "2. Call weather_tool to check the forecast and clothing advice.\n"
-        "3. Call budget_tool to get cost estimation and currency details.\n"
-        "4. Call itinerary_tool to generate a day-by-day plan.\n"
-        "5. Call packing_tool to get a tailored packing checklist.\n"
-        "6. Call travel_advisor_tool to get safety, etiquette, local tips, and flight info (if any).\n\n"
-        "Synthesize all sub-agent responses into a single, comprehensive, and beautiful markdown travel document. "
-        "Store the final plan in ctx.state['itinerary_plan']."
-    ),
-    tools=[
-        research_tool,
-        itinerary_tool,
-        budget_tool,
-        weather_tool,
-        packing_tool,
-        travel_advisor_tool,
-    ],
     output_key="itinerary_plan",
 )
 
 
-# ── Workflow function-nodes ───────────────────────────────────────────
-# With parameter_binding='state' (default), ADK passes matching state
-# fields as kwargs AND the optional `ctx: Context` parameter.
-
-
-def set_request(ctx: Context, node_input: Any = None) -> None:
-    """Captures the user's incoming message and stores it in state."""
-    from google.genai import types as genai_types
-
-    if node_input is None:
-        return
-
-    # node_input from START is types.Content; convert to plain string
-    if isinstance(node_input, genai_types.Content):
-        text_parts = [
-            p.text for p in (node_input.parts or []) if getattr(p, "text", None)
-        ]
-        ctx.state["user_request"] = " ".join(text_parts)
-    elif isinstance(node_input, str):
-        ctx.state["user_request"] = node_input
-    else:
-        ctx.state["user_request"] = str(node_input)
-
-
 def security_checkpoint(ctx: Context) -> None:
-    """Scrubs PII, detects prompt injection, logs audit trail."""
     user_request = ctx.state.get("user_request", "")
     alert = None
 
-    # 1. PII Scrubbing (passport numbers, credit cards)
     scrubbed = re.sub(r"\b[A-Z0-9]{8,9}\b", "[PASSPORT REDACTED]", user_request)
     scrubbed = re.sub(r"\b(?:\d[ -]*?){13,16}\b", "[CREDIT CARD REDACTED]", scrubbed)
 
-    # 2. Prompt injection detection
     injection_keywords = [
         "ignore previous instructions",
         "system prompt",
@@ -183,11 +93,9 @@ def security_checkpoint(ctx: Context) -> None:
     if any(kw in scrubbed.lower() for kw in injection_keywords):
         alert = "Prompt injection detected."
 
-    # 3. Domain-specific rule
     if "10000" in scrubbed and "luxury" not in scrubbed.lower():
         alert = "High budget request without 'luxury' tag. Suspicious activity."
 
-    # 4. Structured JSON audit log
     audit_log = {
         "event": "security_check",
         "severity": "CRITICAL" if alert else "INFO",
@@ -196,7 +104,6 @@ def security_checkpoint(ctx: Context) -> None:
     }
     logger.info(json.dumps(audit_log))
 
-    # CRITICAL: set ctx.route (not return value) so ADK edge routing fires
     if alert:
         ctx.state["security_alert"] = alert
         ctx.route = "blocked"
@@ -204,101 +111,32 @@ def security_checkpoint(ctx: Context) -> None:
         ctx.route = "safe"
 
 
-def human_review(ctx: Context):
-    """Pauses the workflow to ask the human for approval or feedback."""
-    plan = ctx.state.get("itinerary_plan", "")
-    return RequestInput(
-        message=(
-            "Review the proposed trip plan below. "
-            "Say 'approve' to finalize, or provide feedback.\n\n"
-            f"{plan}"
-        ),
-    )
-
-
-def evaluate_feedback(ctx: Context) -> None:
-    """Routes based on human response: approved → done, else → revise."""
-    feedback_text = ""
-
-    # The human's response arrives via resume_inputs
-    if hasattr(ctx, "resume_inputs") and ctx.resume_inputs:
-        for key, value in ctx.resume_inputs.items():
-            if isinstance(value, str):
-                feedback_text = value
-                break
-            if isinstance(value, dict) and "text" in value:
-                feedback_text = value["text"]
-                break
-
-    if not feedback_text:
-        feedback_text = ctx.state.get("human_feedback", "")
-
-    if feedback_text.strip().lower() == "approve":
-        # CRITICAL: set ctx.route so ADK edge routing fires
-        ctx.route = "approved"
-        return
-
-    # Store feedback for next iteration
-    ctx.state["human_feedback"] = feedback_text
-    ctx.state["user_request"] = (
-        ctx.state.get("user_request", "") + f"\n\nFeedback: {feedback_text}"
-    )
-    ctx.route = "needs_revision"
-
-
 def final_output(ctx: Context) -> dict[str, Any]:
-    """Returns the final result to the user."""
     alert = ctx.state.get("security_alert", "")
     if alert:
         return {"status": "error", "message": f"Security block: {alert}"}
     plan = ctx.state.get("itinerary_plan", "")
-    ctx.state["final_output"] = plan
     return {"status": "success", "plan": plan}
 
 
-# ── Build FunctionNode instances ──────────────────────────────────────
-set_request_node = FunctionNode(func=set_request, name="set_request")
 security_node = FunctionNode(func=security_checkpoint, name="security_checkpoint")
-
-# human_review must pause execution (wait_for_output=True) so the user
-# can type their approval/feedback in the ADK web UI.
-# Note: wait_for_output is a BaseNode field set after FunctionNode construction.
-review_node = FunctionNode(func=human_review, name="human_review")
-review_node.wait_for_output = True
-
-evaluate_node = FunctionNode(func=evaluate_feedback, name="evaluate_feedback")
 output_node = FunctionNode(func=final_output, name="final_output")
 
-
-# ── Assemble the Workflow (declarative graph) ─────────────────────────
 workflow = Workflow(
     name="app",
     state_schema=TravelState,
     edges=[
-        # START → capture user message into state → security checkpoint
-        Edge(from_node=START, to_node=set_request_node),
-        Edge(from_node=set_request_node, to_node=security_node),
-        # security → orchestrator (safe) or → final output (blocked)
-        Edge(from_node=security_node, to_node=orchestrator, route="safe"),
+        Edge(from_node=START, to_node=security_node),
+        Edge(from_node=security_node, to_node=planner_agent, route="safe"),
         Edge(from_node=security_node, to_node=output_node, route="blocked"),
-        # orchestrator → human review (unconditional)
-        Edge(from_node=orchestrator, to_node=review_node),
-        # human review → evaluate feedback (unconditional)
-        Edge(from_node=review_node, to_node=evaluate_node),
-        # evaluate → final output (approved) or → orchestrator (revise)
-        Edge(from_node=evaluate_node, to_node=output_node, route="approved"),
-        Edge(from_node=evaluate_node, to_node=orchestrator, route="needs_revision"),
+        Edge(from_node=planner_agent, to_node=itinerary_agent),
+        Edge(from_node=itinerary_agent, to_node=output_node),
     ],
 )
 
-
-# ── Expose as App for ADK web / AgentLoader ───────────────────────────
-# ADK's AgentLoader looks for a module-level `app` variable that is an
-# instance of google.adk.apps.App (or a `root_agent` BaseAgent/BaseNode).
 app = App(
     name="app",
     root_agent=workflow,
 )
 
-# Also expose root_agent alias for compatibility
 root_agent = workflow
