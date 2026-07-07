@@ -19,16 +19,23 @@ make playground        # opens UI at http://localhost:18081
 ## Architecture
 ```mermaid
 graph TD
-    user_query[User Request] --> init_node[Init Request]
-    init_node --> sec_chk[Security Checkpoint]
+    user_query[User Request] --> set_req[set_request node]
+    set_req --> sec_chk[security_checkpoint node]
     sec_chk -- safe --> orch_agent[Orchestrator LlmAgent]
-    sec_chk -- SECURITY_EVENT --> final_output[Final Output / Blocked]
+    sec_chk -- blocked --> final_output[Final Output / Blocked]
     
     orch_agent -- delegates --> res_agent[Research Agent]
+    orch_agent -- delegates --> weather_agent[Weather Agent]
+    orch_agent -- delegates --> budget_agent[Budget Agent]
     orch_agent -- delegates --> itin_agent[Itinerary Agent]
+    orch_agent -- delegates --> packing_agent[Packing Agent]
+    orch_agent -- delegates --> advisor_agent[Travel Advisor Agent]
     
     res_agent -. uses .-> mcp_server[MCP Server]
+    weather_agent -. uses .-> mcp_server[MCP Server]
+    budget_agent -. uses .-> mcp_server[MCP Server]
     itin_agent -. uses .-> mcp_server[MCP Server]
+    advisor_agent -. uses .-> mcp_server[MCP Server]
     
     orch_agent --> hitl[Human Review ✋]
     hitl -- approve --> final_output
