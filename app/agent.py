@@ -48,8 +48,7 @@ research_agent = LlmAgent(
     name="research_agent",
     model=config.model,
     instruction=(
-        "Research destinations. Provide highlights, weather insights, "
-        "and budget estimates."
+        "Research destination facts and popular attractions using the local attractions tool."
     ),
     tools=[mcp_toolset],
 )
@@ -58,8 +57,48 @@ itinerary_agent = LlmAgent(
     name="itinerary_agent",
     model=config.model,
     instruction=(
-        "Create detailed day-by-day itineraries and packing lists "
-        "based on destination research."
+        "Create a detailed, day-by-day travel itinerary based on the destination highlights, "
+        "budget, and weather information."
+    ),
+    tools=[mcp_toolset],
+)
+
+budget_agent = LlmAgent(
+    name="budget_agent",
+    model=config.model,
+    instruction=(
+        "Provide cost estimation for the trip including lodging, food, transport, and activities. "
+        "Handle currency conversions using the currency exchange tool if needed."
+    ),
+    tools=[mcp_toolset],
+)
+
+weather_agent = LlmAgent(
+    name="weather_agent",
+    model=config.model,
+    instruction=(
+        "Retrieve weather forecasts and provide clothing/gear advice for the destination "
+        "using the weather forecast tool."
+    ),
+    tools=[mcp_toolset],
+)
+
+packing_agent = LlmAgent(
+    name="packing_agent",
+    model=config.model,
+    instruction=(
+        "Create a personalized packing checklist based on the destination, "
+        "planned activities, and weather advice."
+    ),
+    tools=[],
+)
+
+travel_advisor_agent = LlmAgent(
+    name="travel_advisor_agent",
+    model=config.model,
+    instruction=(
+        "Provide safety recommendations, local etiquette rules, general travel tips, "
+        "and track flight status if flight numbers are provided using the flight status tool."
     ),
     tools=[mcp_toolset],
 )
@@ -68,21 +107,37 @@ itinerary_agent = LlmAgent(
 # ── Orchestrator ──────────────────────────────────────────────────────
 research_tool = AgentTool(agent=research_agent)
 itinerary_tool = AgentTool(agent=itinerary_agent)
+budget_tool = AgentTool(agent=budget_agent)
+weather_tool = AgentTool(agent=weather_agent)
+packing_tool = AgentTool(agent=packing_agent)
+travel_advisor_tool = AgentTool(agent=travel_advisor_agent)
 
 orchestrator = LlmAgent(
     name="orchestrator",
     model=config.model,
     instruction=(
-        "You are the lead travel concierge. "
-        "Coordinate with the research and itinerary agents to fulfill "
-        "the user's travel request from ctx.state['user_request']. "
-        "Always call the research tool first, "
-        "then use the itinerary tool to build a day-by-day plan. "
+        "You are the lead travel concierge. Coordinate with all specialized sub-agents "
+        "to fulfill the user's travel request from ctx.state['user_request'].\n\n"
+        "Follow these steps sequentially to build the complete travel plan:\n"
+        "1. Call research_tool to get local attractions and highlights.\n"
+        "2. Call weather_tool to check the forecast and clothing advice.\n"
+        "3. Call budget_tool to get cost estimation and currency details.\n"
+        "4. Call itinerary_tool to generate a day-by-day plan.\n"
+        "5. Call packing_tool to get a tailored packing checklist.\n"
+        "6. Call travel_advisor_tool to get safety, etiquette, local tips, and flight info (if any).\n\n"
+        "Synthesize all sub-agent responses into a single, comprehensive, and beautiful markdown travel document. "
         "Store the final plan in ctx.state['itinerary_plan']."
     ),
-    tools=[research_tool, itinerary_tool],
+    tools=[
+        research_tool,
+        itinerary_tool,
+        budget_tool,
+        weather_tool,
+        packing_tool,
+        travel_advisor_tool,
+    ],
     output_key="itinerary_plan",
-) 
+)
 
 
 # ── Workflow function-nodes ───────────────────────────────────────────
